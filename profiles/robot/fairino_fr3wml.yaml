@@ -1,0 +1,23 @@
+# Profile — FAIRINO FR3WML, 6-axis. Realises contracts/robot.md.
+
+role: robot
+model: fr3wml
+vendor: FAIRINO
+dof: 6
+
+description:
+  package: fr5_app                 # the URDF and mesh root of this robot
+  xacro: urdf/fr3wml_suction.urdf.xacro
+  base_frame: base_link
+  tip_link: tcp
+  planning_group: fr3wml
+  joints: [j1, j2, j3, j4, j5, j6]
+
+state:
+  arm_joint_states_remap_to: /joint_states_robot   # merged into /joint_states
+
+backends:
+  mock:  {ros2_control: mock_components}
+  isaac: {ros2_control: topic_based_ros2_control,
+          command_topic: /isaac_joint_commands, state_topic: /isaac_joint_states}
+  real:  {package: fairino_bridge}

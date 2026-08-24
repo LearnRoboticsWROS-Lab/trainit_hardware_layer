@@ -1,0 +1,59 @@
+# Profile — Intel RealSense D455
+#
+# Describes ONE piece of hardware in the terms of contracts/camera.md. The contract says
+# what a camera must expose; this says what THIS camera is. Application code reads the
+# profile, never the model name.
+#
+# The same file serves simulation and hardware: that is the point. Only `backends` and
+# the calibrated extrinsics differ, and the extrinsics live with the cell, not here.
+
+role: camera
+model: realsense_d455
+vendor: Intel
+
+description:
+  # The OFFICIAL description package, deliberately: simulation and the real robot then
+  # share one frame tree, so a hand-eye calibration transfers without re-derivation.
+  package: realsense2_description
+  xacro: urdf/_d455.urdf.xacro
+  macro: sensor_d455
+  args:
+    # MUST be true off-hardware. With false the macro does not create the optical
+    # frames AT ALL, and a point cloud has no frame to attach to. The macro's own
+    # comment says so.
+    use_nominal_extrinsics: true
+  # The caller's <origin> lands on _bottom_screw_frame, NOT on _link.
+  mount_frame_suffix: _bottom_screw_frame
+  # _bottom_screw_frame -> _link, from the macro's own properties.
+  link_offset_from_mount: [0.01115, 0.0475, 0.0145]
+
+frames:
+  prefix: camera            # every frame is <prefix>_<something>
+  body: camera_link
+  color_optical: camera_color_optical_frame
+  depth_optical: camera_depth_optical_frame
+
+topics:
+  namespace: /camera        # then the names in contracts/camera.md
+
+# Nominal sensor characteristics. Used by the mock adapter and as a sanity check
+# against the CameraInfo a real device reports.
+sensor:
+  color:  {width: 848, height: 480, fps: 30, encoding: rgb8, hfov_deg: 90.0}
+  depth:  {width: 848, height: 480, fps: 30, encoding: 16UC1, units: millimetres,
+           hfov_deg: 87.0, range_m: [0.4, 6.0]}
+
+backends:
+  mock:
+    package: trainit_hardware_layer
+    executable: mock_camera
+  isaac:
+    # No ROS-side node: the ROS2 Camera Helper publishes the contract directly.
+    # See contracts/camera.md for the helper settings.
+    node: null
+    isaac_side: ros2_camera_helper
+  real:
+    # Runs in the Isaac ROS container on the Jetson, remapped onto the contract names.
+    package: realsense2_camera
+    executable: realsense2_camera_node
+    remote: true
