@@ -63,21 +63,63 @@ low rate with a plausible `CameraInfo`. Enough to prove the pipeline is wired; i
 a renderer and never will be.
 
 ### `isaac`
-The **ROS2 Camera Helper** OmniGraph node, wired to the render product of the camera
-prim. **No ROS-side node is needed** — unlike the gripper, where Isaac cannot speak a
-service contract, the helper publishes the contract topics directly. Configure:
+The **ROS2 Camera Helper** OmniGraph nodes publish the image topics directly. Note that
+`camera_info` is *not* in the Camera Helper's `type` list: since Isaac 4.x it is a
+separate **ROS2 Camera Info Helper** node, because it also has to serve stereo pairs.
 
-| Helper setting | Value |
-|---|---|
-| `type` | `rgb`, then a second helper with `depth`, and one with `depth_pcl` |
-| `topicName` | the contract name above |
-| `frameId` | the matching **optical** frame |
-| QoS | `BEST_EFFORT` for image and points |
+| node | `type` | `topicName` |
+|---|---|---|
+| Camera Helper | `rgb` | `<ns>/color/image_raw` |
+| Camera Helper | `depth` | `<ns>/depth/image_rect_raw` |
+| Camera Info Helper | — | `<ns>/color/camera_info` |
 
-If a shim ever turns out to be necessary, it belongs in `adapters/camera/` — but do not
-write one before something actually requires it.
+Every one of them needs `execIn` from the tick, `renderProductPath` from the render
+product, and **`context` from the ROS2 Context node**. Forget the context wire and the
+nodes run happily, publish into a different ROS context, and `ros2 topic list` shows
+nothing — with no error.
+
+**The cloud is the exception, and it matters.** Isaac's `depth_pcl` helper emits **XYZ
+only**, while the real `realsense2_camera` publishes `<ns>/depth/color/points` as
+**XYZRGB**. Same topic name, different content: perception written against the simulator
+would break on hardware, which is the exact failure this contract exists to prevent.
+
+So in simulation, **do not use the `depth_pcl` helper**. Build the cloud the way the real
+driver does, from the depth image plus the colour image plus the intrinsics:
+
+```bash
+ros2 component standalone depth_image_proc depth_image_proc::PointCloudXyzrgbNode \
+  --node-name pcl_xyzrgb \
+  -r rgb/image_rect_color:=/camera/color/image_raw \
+  -r rgb/camera_info:=/camera/color/camera_info \
+  -r depth_registered/image_rect:=/camera/depth/image_rect_raw \
+  -r points:=/camera/depth/color/points
+```
+
+That is not a workaround: `depth_image_proc` is the standard ROS component, and the same
+fusion happens inside the vendor driver. It also settles the depth-encoding question —
+it accepts both `32FC1` and `16UC1`, so nothing downstream has to care.
+
+**The rule that follows: perception reads the CLOUD, never the raw depth image.** With
+that, the encoding difference between simulator and hardware stops being anybody's
+problem.
+
+`depth_registered` in the remap is literal, not aspirational: the depth must already be
+registered to the colour frame. In simulation it is, because both come from one camera
+prim. On hardware the driver aligns them when `align_depth.enable` is set.
+
+If a further shim ever turns out to be necessary, it belongs in `adapters/camera/` — but
+do not write one before something requires it.
 
 ### `real`
 `realsense2_camera` in the Isaac ROS container on the Jetson, remapped onto the contract
-names. The URDF still comes from `realsense2_description` here, so the frame tree matches
+names. With `pointcloud.enable:=true` it publishes `<ns>/depth/color/points` as XYZRGB
+itself, so **no `depth_image_proc` is needed there** — the simulator adds it precisely to
+match what the driver already does.
+
+The URDF still comes from `realsense2_description` here, so the frame tree matches
 simulation exactly and a hand-eye calibration transfers without re-derivation.
+
+> **Unverified.** The driver's behaviour above is from its documentation; it was not
+> measured, because `realsense2_camera` is not installed on the development machine.
+> Confirm it against the actual Jetson container before relying on it — and if the
+> container's defaults differ, remap there rather than changing the contract.
