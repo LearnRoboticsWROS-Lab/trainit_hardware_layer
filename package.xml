@@ -2,11 +2,13 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>trainit_hardware_layer</name>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
   <description>
     TrainIt hardware abstraction layer: the ROS contracts every hardware role must
     expose, the profiles that describe a specific piece of hardware in those terms,
-    and the adapters that realise a contract on a given backend (mock / isaac / real).
+    and the adapters that realise a contract on a given backend (mock / isaac / real),
+    among them the canonical end-effector adapters of ADR-0022 (mock_eef_adapter,
+    isaac_eef_adapter).
   </description>
   <maintainer email="ros.master.ai@gmail.com">fra</maintainer>
   <license>Apache-2.0</license>
@@ -18,11 +20,19 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <!-- The canonical end-effector adapters (ADR-0022 D8): the tool state is a TrainIt message;
+       every command stays a standard ROS type, one per actuator. -->
+  <exec_depend>trainit_interfaces</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>control_msgs</exec_depend>
+  <exec_depend>trajectory_msgs</exec_depend>
+  <exec_depend>action_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
+  <test_depend>ament_index_python</test_depend>
 
   <export>
     <build_type>ament_python</build_type>

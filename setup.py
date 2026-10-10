@@ -7,7 +7,7 @@ package_name = 'trainit_hardware_layer'
 
 setup(
     name=package_name,
-    version='0.1.0',
+    version='0.2.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
@@ -30,6 +30,10 @@ setup(
             # points are generated executable, so they cannot hit the permission bug
             # that broke mode:=isaac on 2026-08-24.
             'mock_camera = trainit_hardware_layer.camera.mock_camera_node:main',
+            # The canonical end-effector adapters (ADR-0022 D8): the rows trainit_mock and
+            # trainit_isaac_surface_gripper.
+            'mock_eef_adapter = trainit_hardware_layer.eef.mock_eef_adapter:main',
+            'isaac_eef_adapter = trainit_hardware_layer.eef.isaac_eef_adapter:main',
         ],
     },
 )

@@ -1,0 +1,151 @@
+# ADR-0022 conformance fixture (vNext M2.6): one bt_params-style eef block with four devices.
+# Synthetic names and values only. Byte copies live in the test data of trainit_motion_runtime
+# (C++ parser), trainit_hardware_layer (Python parser) and trainit_setup_assistant (generator),
+# pinned by sha256; each parser's normalised dump must equal eef_conformance.expected.txt.
+/**:
+  ros__parameters:
+    gripper_action: ""
+    eef:
+      ids: ["composite_tool", "suction_simple", "jaw_simple", "jaw_binary"]
+      composite_tool:
+        actuator_ids: ["linear_axis", "rotary_axis", "wrist_mechanism", "gripper_a", "gripper_b", "binary_lock"]
+        site_ids: ["site_a", "site_b"]
+        command_timeout_ms: 10000
+        scene_signal: "none"
+        actuators:
+          linear_axis:
+            command_interface: "follow_joint_trajectory"
+            action: "linear_axis_controller/follow_joint_trajectory"
+            joints: ["robot_a_linear_axis_joint"]
+            targets:
+              home: [0.0]
+              extended: [0.08]
+            goal_tolerance: [0.002]
+            duration_s: 1.0
+            goal_time_tolerance_s: 0.5
+          rotary_axis:
+            command_interface: "follow_joint_trajectory"
+            action: "rotary_axis_controller/follow_joint_trajectory"
+            joints: ["robot_a_rotary_axis_joint"]
+            targets:
+              receive: [0.0]
+              transfer: [0.9]
+            goal_tolerance: [0.01]
+            path_tolerance: [0.2]
+            duration_s: 1.0
+            goal_time_tolerance_s: 0.5
+          wrist_mechanism:
+            command_interface: "follow_joint_trajectory"
+            action: "wrist_mechanism_controller/follow_joint_trajectory"
+            joints: ["robot_a_wrist_pitch_joint", "robot_a_wrist_roll_joint"]
+            targets:
+              stow: [0.0, 0.0]
+              present: [0.3, -0.3]
+            goal_tolerance: [0.01, 0.01]
+            duration_s: 1.5
+            goal_time_tolerance_s: 0.5
+          gripper_a:
+            command_interface: "gripper_command"
+            action: "gripper_a_controller/gripper_cmd"
+            joints: ["robot_a_jaw_a_joint"]
+            targets:
+              open: 0.02
+              closed: 0.0
+            result_policy: "succeeded_or_stalled"
+            max_effort: 20.0
+          gripper_b:
+            command_interface: "set_bool"
+            joints: ["robot_a_jaw_b_joint"]
+            joint_positions:
+              engaged: [0.0]
+              released: [0.02]
+          binary_lock:
+            command_interface: "set_bool"
+            actuation_feedback: true
+            confirm_timeout_ms: 2000
+        sites:
+          site_a:
+            grip: "gripper_a"
+            engage: "closed"
+            release: "open"
+          site_b:
+            grip: "gripper_b"
+            engage: "engage"
+            release: "release"
+        verification:
+          require_grasp_confirmation: true
+          require_release_confirmation: true
+          accepted_evidence: ["sensor"]
+          timeout_ms: 3000
+          max_age_ms: 500
+          clock_tolerance_ms: 100
+      suction_simple:
+        actuator_ids: ["vacuum"]
+        site_ids: ["main"]
+        command_timeout_ms: 10000
+        scene_signal: "adapter"
+        actuators:
+          vacuum:
+            command_interface: "set_bool"
+        sites:
+          main:
+            grip: "vacuum"
+            engage: "engage"
+            release: "release"
+        verification:
+          require_grasp_confirmation: false
+          require_release_confirmation: false
+          accepted_evidence: ["sensor", "sim_ground_truth"]
+          timeout_ms: 3000
+          max_age_ms: 500
+          clock_tolerance_ms: 100
+      jaw_simple:
+        actuator_ids: ["gripper"]
+        site_ids: ["main"]
+        command_timeout_ms: 10000
+        scene_signal: "tmr"
+        actuators:
+          gripper:
+            command_interface: "gripper_command"
+            action: "gripper_controller/gripper_cmd"
+            joints: ["finger_joint"]
+            targets:
+              open: 0.0
+              closed: 0.7
+            result_policy: "succeeded_or_stalled"
+        sites:
+          main:
+            grip: "gripper"
+            engage: "closed"
+            release: "open"
+        verification:
+          require_grasp_confirmation: false
+          require_release_confirmation: false
+          accepted_evidence: ["sensor", "sim_ground_truth"]
+          timeout_ms: 3000
+          max_age_ms: 500
+          clock_tolerance_ms: 100
+      jaw_binary:
+        actuator_ids: ["gripper"]
+        site_ids: ["main"]
+        command_timeout_ms: 10000
+        scene_signal: "adapter"
+        actuators:
+          gripper:
+            command_interface: "set_bool"
+            joints: ["jaw_joint"]
+            joint_positions:
+              engaged: [0.0]
+              released: [0.02]
+        sites:
+          main:
+            grip: "gripper"
+            engage: "engage"
+            release: "release"
+        verification:
+          require_grasp_confirmation: false
+          require_release_confirmation: false
+          accepted_evidence: ["sensor", "sim_ground_truth"]
+          timeout_ms: 3000
+          max_age_ms: 500
+          clock_tolerance_ms: 100
