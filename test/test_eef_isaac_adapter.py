@@ -12,7 +12,9 @@ timeout, then NOT_HELD or LOST); a malformed or contradictory sample reads UNKNO
 can raise in the callback and stop the adapter (non-ASCII digits, an over-long count, a failing
 mapping); a status timeout gives UNKNOWN / NONE; a status topic that never publishes is named in
 detail; the per-robot reset is a release; a rejected release does not disarm LOST; use_sim_time
-stamps on the simulation clock; the start-up refusals.
+stamps on the simulation clock; the start-up refusals. From the T5 Isaac run: a subscriber alone
+is not the stage; a dead stage (its /clock stopped) reads UNKNOWN on the wall clock; the one-frame
+"Closed 0" of a re-grip is never a false LOST.
 """
 import random
 import time
@@ -80,7 +82,10 @@ def test_h7_the_mapping_is_by_name():
     assert map_stage_status('Closing 0', True, 0, second) == (Reading.UNDECIDED, '')
     assert map_stage_status('Open 0', True, second // 2, second) == (Reading.UNDECIDED, '')
     assert map_stage_status('Open 0', True, 2 * second, second) == (Reading.NOT_HELD, '')
-    assert map_stage_status('Closed 0', True, 2 * second, second) == (Reading.NOT_HELD, '')
+    # Isaac 5.1 reports "Closed 0" for one frame on every attach (a re-grip included): after an
+    # engage it is a transient, never a decision; with no engage it is nothing held
+    assert map_stage_status('Closed 0', True, 2 * second, second) == (Reading.UNDECIDED, '')
+    assert map_stage_status('Closed 0', False, 0, second) == (Reading.NOT_HELD, '')
     assert map_stage_status('Open 0', False, 0, second) == (Reading.NOT_HELD, '')
     # never by a literal int, and never a guess on a contradiction
     for text in ('2 1', '0 0', 'Closed', 'Closed -1', 'closed 1', 'Open x', 'Closed 1 extra', ''):
@@ -190,14 +195,17 @@ def test_h7_the_stage_status_drives_the_site(harness):
     stage.text = 'Open 0'
     w.wait(lambda m: site(m, 'main')[0] == Grasp.NOT_HELD)
     stage.publishing = False
-    silent = w.wait(lambda m: site(m, 'main')[0] == Grasp.UNKNOWN, timeout=3.0)
+    silent = w.wait(lambda m: site(m, 'main')[0] == Grasp.UNKNOWN and m.status == TS.UNAVAILABLE,
+                    timeout=3.0)
     assert site(silent, 'main')[1] == Evidence.NONE
-    assert silent.detail == 'main: no deciding-source sample for more than 400 ms'
+    assert silent.detail == ('vacuum: no stage status on /i2/stage/suction_status for 400 ms (a '
+                             'subscriber alone is not the stage); '
+                             'main: no deciding-source sample for more than 400 ms')
     stamp = site(silent, 'main')[2]
     time.sleep(0.3)
     assert site(w.latest(), 'main')[2] == stamp                         # heartbeats never re-stamp
     stage.publishing = True
-    w.wait(lambda m: site(m, 'main')[0] == Grasp.NOT_HELD and m.detail == '')
+    w.wait(lambda m: site(m, 'main')[0] == Grasp.NOT_HELD and m.detail == '' and m.status == TS.READY)
 
 
 def test_h7_no_stage_sample_can_stop_the_adapter(harness, monkeypatch):
@@ -229,15 +237,20 @@ def test_h7_no_stage_sample_can_stop_the_adapter(harness, monkeypatch):
 
 def test_h7_a_status_topic_that_never_publishes_is_named(harness):
     """A wrong stage_status_topic: nothing ever arrives. The site stays UNKNOWN / NONE with no
-    stamp and the vacuum READY; detail names the site once status_timeout_ms (400) has passed."""
+    stamp; the vacuum is UNAVAILABLE (a stage that does not talk is not there), and detail names
+    the site once status_timeout_ms (400) has passed."""
     harness.isaac('/i6', stage_cmd_topic=CMD, stage_status_topic=STATUS)
     stage = FakeStage(harness, '/i6', publishing=False)
     probe = harness.helper('h7_unheard')
     w = h.StateWatch(probe, '/i6/eef/suction_simple/state', depth=500)
-    m = w.wait(lambda m: m.status == TS.READY and m.detail == 'main: no sample from its source yet', timeout=6.0)
+    m = w.wait(lambda m: m.detail.endswith('main: no sample from its source yet'), timeout=6.0)
     assert site(m, 'main') == (Grasp.UNKNOWN, Evidence.NONE, 0)
+    # with a status topic, the stage is there only when it TALKS: the subscriber alone is not it
+    assert m.status == TS.UNAVAILABLE and m.detail.startswith(
+        'vacuum: no stage status on /i6/stage/suction_status for 400 ms')
     stage.publishing = True
-    w.wait(lambda m: site(m, 'main')[:2] == (Grasp.NOT_HELD, SIM) and m.detail == '')
+    w.wait(lambda m: site(m, 'main')[:2] == (Grasp.NOT_HELD, SIM) and m.detail == ''
+           and m.status == TS.READY)
 
 
 def test_h7_the_per_robot_reset_is_a_release(harness):
@@ -339,3 +352,76 @@ def test_h7_actuation_feedback_is_refused_on_isaac(harness):
     with pytest.raises(Refused) as e:
         harness.isaac('/ix', 'suction_simple', block, stage_cmd_topic=CMD)
     assert e.value.key == 'eef.suction_simple.actuators.vacuum.actuation_feedback'
+
+
+def test_h7_a_subscriber_alone_is_not_the_stage(harness):
+    """T5 found it: any subscriber on the stage command topic (a recorder, an echo) made the
+    adapter answer success with no stage. With a status topic the stage must also TALK."""
+    harness.isaac('/i8', stage_cmd_topic=CMD, stage_status_topic=STATUS)
+    stage = FakeStage(harness, '/i8', publishing=False)           # subscribes, never reports
+    probe = harness.helper('h7_mute_stage')
+    w = h.StateWatch(probe, '/i8/eef/suction_simple/state', depth=500)
+    client = _client(probe, '/i8')
+    w.wait(lambda m: m.status == TS.UNAVAILABLE, timeout=6.0)
+    response = h.call(client, SetBool.Request(data=True))
+    assert response.success is False
+    assert response.message.startswith('no stage status on /i8/stage/suction_status for 400 ms')
+    assert actuator(w.latest(), 'vacuum').last_command == Command.NONE  # nothing applied
+    stage.publishing = True
+    w.wait(lambda m: m.status == TS.READY, timeout=6.0)
+    assert h.call(client, SetBool.Request(data=True)).success
+
+
+def test_h7_a_dead_stage_reads_unknown_even_with_its_clock_stopped(harness):
+    """T5 found it: a stage that dies stops /clock, and with it every sim-time silence: the adapter
+    kept publishing its last HELD with a frozen stamp, which a consumer on the same frozen clock
+    judges fresh. Silence is measured on the WALL clock too."""
+    harness.isaac('/i9', stage_cmd_topic=CMD, stage_status_topic=STATUS, use_sim_time=True)
+    stage = FakeStage(harness, '/i9')
+    probe = harness.helper('h7_dead_stage')
+    w = h.StateWatch(probe, '/i9/eef/suction_simple/state', depth=2000)
+    client = _client(probe, '/i9')
+    clock = probe.create_publisher(Clock, '/clock', 10)
+    sim = [1000 * 1_000_000_000]
+    running = [True]
+
+    def tick():
+        if running[0]:
+            sim[0] += 10_000_000
+            clock.publish(Clock(clock=Time(sec=sim[0] // 1_000_000_000, nanosec=sim[0] % 1_000_000_000)))
+    probe.create_timer(0.01, tick)
+    w.wait(lambda m: m.status == TS.READY and site(m, 'main')[0] == Grasp.NOT_HELD, timeout=6.0)
+    assert h.call(client, SetBool.Request(data=True)).success
+    stage.text = 'Closed 1'
+    held = w.wait(lambda m: site(m, 'main')[0] == Grasp.HELD)
+    running[0] = False                       # the stage dies: no /clock, no status
+    stage.publishing = False
+    gone = w.wait(lambda m: site(m, 'main')[0] == Grasp.UNKNOWN, timeout=3.0)
+    assert site(gone, 'main')[1] == Evidence.NONE and site(gone, 'main')[2] == site(held, 'main')[2]
+    assert gone.status == TS.UNAVAILABLE                                  # and the stage is gone
+    time.sleep(0.5)
+    assert all(site(m, 'main')[0] != Grasp.HELD for m in w.since(gone))
+
+
+def test_h7_a_re_grip_after_a_slip_is_never_a_false_lost(harness):
+    """T5 found it: after the engage window, a slip (Closing 0) then a re-grip passes through the
+    one-frame "Closed 0" Isaac reports on every attach; read as NOT_HELD it latched a LOST while
+    the stage held the part again. "Closed 0" after an engage decides nothing."""
+    harness.isaac('/i10', stage_cmd_topic=CMD, stage_status_topic=STATUS, engage_timeout_ms=300)
+    stage = FakeStage(harness, '/i10', status_hz=50.0)
+    probe = harness.helper('h7_regrip')
+    w = h.StateWatch(probe, '/i10/eef/suction_simple/state', depth=4000)
+    client = _client(probe, '/i10')
+    w.wait(lambda m: m.status == TS.READY and site(m, 'main')[0] == Grasp.NOT_HELD, timeout=6.0)
+    assert h.call(client, SetBool.Request(data=True)).success
+    stage.text = 'Closed 1'
+    held = w.wait(lambda m: site(m, 'main')[0] == Grasp.HELD)
+    time.sleep(0.5)                                                       # past the engage window
+    for text, dwell in (('Closing 0', 0.15), ('Closed 0', 0.1), ('Closed 1', 0.3)):
+        stage.text = text
+        time.sleep(dwell)
+    w.wait(lambda m: site(m, 'main')[0] == Grasp.HELD and site(m, 'main')[2] > site(held, 'main')[2])
+    assert all(site(m, 'main')[0] != Grasp.LOST for m in w.since(held))
+    # a real loss still latches: the gripper gives up (Open 0) after the window
+    stage.text = 'Open 0'
+    w.wait(lambda m: site(m, 'main')[0] == Grasp.LOST)

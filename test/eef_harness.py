@@ -192,6 +192,14 @@ class StateWatch:
         with self._lock:
             return [m for _, m in self.samples]
 
+    def since(self, message) -> List[Any]:
+        """Every sample from `message` (the very object a wait returned) on, in arrival order."""
+        with self._lock:
+            for i, (_, m) in enumerate(self.samples):
+                if m is message:
+                    return [x for _, x in self.samples[i:]]
+        raise AssertionError(f'{self.topic}: the sample is not one this watch received')
+
     def wait(self, pred: Callable[[Any], bool], timeout: float = 5.0, what: str = ''):
         """The first sample, newest first, that satisfies `pred` within `timeout`; else fail."""
         found = []

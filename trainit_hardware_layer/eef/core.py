@@ -350,6 +350,7 @@ class _SiteState:
         self.reading_stamp = 0
         self.reading_seq = 0        # the model's arrival order of that reading
         self.silent = False
+        self.wall_silent = False  # silent on the adapter's wall clock (a stopped simulation clock)
         self.unheard = False     # no reading yet, and its silence window since the start has passed
         self.lost = False
         self.armed = False
@@ -512,6 +513,7 @@ class DeviceModel:
         self._seq += 1
         site.reading_seq = self._seq
         site.silent = False
+        site.wall_silent = False
         site.unheard = False
         if reading == Reading.HELD:
             if engaged and not site.lost and stamp >= grip.last_command_stamp:
@@ -523,6 +525,13 @@ class DeviceModel:
 
     def set_site_note(self, s: str, note: str) -> None:
         self._site(s).note = note
+
+    def set_source_silent(self, s: str, silent: bool) -> None:
+        """The adapter's own WALL-clock silence of a site's source. ``tick`` measures silence on the
+        adapter's ROS clock, which stops with a simulation (a dead or paused stage freezes /clock):
+        a source that sends nothing for its silence timeout of real time reads UNKNOWN too, never
+        its last decision. The next reading clears it."""
+        self._site(s).wall_silent = bool(silent)
 
     def start(self, stamp: int) -> None:
         """The adapter started observing (its initial observation); the first call counts.
@@ -562,7 +571,7 @@ class DeviceModel:
         if site.reading is None:
             return Grasp.UNKNOWN, Evidence.NONE, 0
         stamp = site.reading_stamp
-        if site.silent or site.reading == Reading.CANNOT_TELL:
+        if site.silent or site.wall_silent or site.reading == Reading.CANNOT_TELL:
             return Grasp.UNKNOWN, Evidence.NONE, stamp
         if site.lost:
             return Grasp.LOST, site.source, stamp
@@ -591,7 +600,7 @@ class DeviceModel:
             site = self._sites[s]
             if site.note:
                 parts.append(f'{s}: {site.note}')
-            if site.silent:
+            if site.silent or site.wall_silent:
                 parts.append(f'{s}: no deciding-source sample for more than '
                              f'{site.silence_ns // 1_000_000} ms')
             if site.unheard:

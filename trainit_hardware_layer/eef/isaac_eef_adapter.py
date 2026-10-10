@@ -14,9 +14,11 @@ Commands. std_srvs/SetBool ``eef/<id>/actuators/<vacuum>/set_engaged`` (and the 
 endpoints of ``adapter_node``). An applied command is published on ``stage_cmd_topic`` as a
 std_msgs/Bool (true engages). That publisher is TRANSIENT_LOCAL and is republished at
 ``republish_rate_hz``, because the stage's subscription is volatile; the adapter starts released
-(it publishes false), as the legacy bridge does. With no stage subscriber the command is refused
-(``success: false``), nothing is applied, and the vacuum reads UNAVAILABLE until a subscriber
-appears.
+(it publishes false), as the legacy bridge does. With no stage the command is refused
+(``success: false``), nothing is applied, and the vacuum reads UNAVAILABLE until the stage is
+back. The stage is there when its command topic has a subscriber and, with ``stage_status_topic``,
+when its status arrived within ``status_timeout_ms`` of WALL time: a subscriber alone (a recorder,
+an echo) is not the stage. Without a status topic a subscriber is all the adapter can see.
 
 State. Without ``stage_status_topic`` the site is UNAVAILABLE with evidence NONE: on this backend
 there is then no ``grasp_detection``, and a grasp is never inferred from the command echo. With it,
@@ -29,10 +31,16 @@ SIM_GROUND_TRUTH:
 | Closed | > 0 | - | ENGAGED / HELD |
 | Closing | > 0 | - | ENGAGED / HELD, ``detail``: partial attachment |
 | Closing | 0 | - | ENGAGED / PENDING |
-| Open (or Closed) | 0 | after an applied ENGAGE | PENDING within ``engage_timeout_ms``; |
+| Closed | 0 | after an applied ENGAGE | ENGAGED / PENDING: a transient (Isaac 5.1 reports it for |
+| | | | one frame on every attach, a re-grip included), never a decision |
+| Open | 0 | after an applied ENGAGE | PENDING within ``engage_timeout_ms``; |
 | | | | then NOT_HELD, or LOST if it had been HELD |
 | Open (or Closed) | 0 | after an applied RELEASE, or no command | RELEASED / NOT_HELD |
 | no sample within ``status_timeout_ms`` | - | - | site UNKNOWN, evidence NONE |
+
+Silence is measured on both clocks: the ROS clock (sim time) and the WALL clock, because a dead or
+paused stage stops ``/clock`` and with it any sim-time silence; a stage that sent nothing for
+``status_timeout_ms`` of real time reads UNKNOWN, never its last decision.
 
 The vacuum's ``binary`` is always the APPLIED command (the stage status is site evidence, never a
 switch: ``binary_confirmed`` stays false). A malformed sample ("2 1", "Open x", a count that is not
@@ -127,6 +135,11 @@ def map_stage_status(text: str, engaged: bool, since_engage_ns: int,
         return Reading.CANNOT_TELL, f'contradictory stage status {_quoted(text)}'
     if name == 'Closing':
         return Reading.UNDECIDED, ''
+    if name == 'Closed' and engaged:
+        # Isaac Sim 5.1 reports "Closed 0" for one frame on every attach, a re-grip included: a
+        # transient, never a decision. A gripper that finds nothing retries as Closing and gives up
+        # as Open, and "Open 0" is what decides (vNext M2.6 T5).
+        return Reading.UNDECIDED, ''
     if engaged and since_engage_ns <= engage_timeout_ns:
         return Reading.UNDECIDED, ''
     return Reading.NOT_HELD, ''
@@ -174,6 +187,9 @@ class IsaacEefAdapter(EefAdapterNode):
         self._commanded = False
         self._reset_level = False
         self._stage_resolved = ''
+        self._status_resolved = ''
+        self._status_arrival = 0          # steady ns of the newest stage status, 0 = none yet
+        self._stage_note = ''
         source = core.Evidence.SIM_GROUND_TRUTH if self.stage_status_topic else None
         return ({self.site: source}, {self.site: self.status_timeout_ms * 1_000_000})
 
@@ -186,9 +202,10 @@ class IsaacEefAdapter(EefAdapterNode):
         self.create_timer(1.0 / self.republish_rate_hz, self._republish,
                           callback_group=self._timer_group, clock=self._steady)
         if self.stage_status_topic:
-            self._named('stage_status_topic', lambda: self.create_subscription(
+            sub = self._named('stage_status_topic', lambda: self.create_subscription(
                 String, self.stage_status_topic, self._on_stage_status, STATUS_QOS,
                 callback_group=group))
+            self._status_resolved = sub.topic_name
         if self.scene_reset_topic:
             self._named('scene_reset_topic', lambda: self.create_subscription(
                 Bool, self.scene_reset_topic, self._on_reset, RESET_QOS, callback_group=group))
@@ -205,15 +222,32 @@ class IsaacEefAdapter(EefAdapterNode):
         self.core.observe_actuator(self.vacuum, now, binary=Binary.RELEASED)
         self._check_subscriber()
 
+    def _status_silent(self) -> bool:
+        """No stage status for status_timeout_ms of WALL time (none yet counts as silent). The ROS
+        clock cannot tell: a dead or paused stage stops /clock, and with it the sim-time silence."""
+        return (self._status_arrival == 0
+                or self.steady_ns() - self._status_arrival > self.status_timeout_ms * 1_000_000)
+
     def _check_subscriber(self) -> bool:
-        if self._stage_pub.get_subscription_count() > 0:
+        """Is the stage there? With a status topic the stage must also be TALKING: a subscriber
+        alone (a recorder, an echo) is not the stage. Without one, a subscriber is all there is to
+        see (recorded as debt)."""
+        if self._stage_pub.get_subscription_count() == 0:
+            note = f'no stage subscriber on {self._stage_resolved}'
+        elif self.stage_status_topic and self._status_silent():
+            note = (f'no stage status on {self._status_resolved} for {self.status_timeout_ms} ms '
+                    '(a subscriber alone is not the stage)')
+        else:
+            self._stage_note = ''
             self.core.set_condition(self.vacuum, None)
             return True
-        self.core.set_condition(self.vacuum, ActuatorStatus.UNAVAILABLE,
-                                f'no stage subscriber on {self._stage_resolved}')
+        self._stage_note = note
+        self.core.set_condition(self.vacuum, ActuatorStatus.UNAVAILABLE, note)
         return False
 
     def _tick(self, now: int) -> None:
+        if self.stage_status_topic and self._status_arrival:
+            self.core.set_source_silent(self.site, self._status_silent())
         self._check_subscriber()
 
     def _republish(self) -> None:
@@ -225,7 +259,7 @@ class IsaacEefAdapter(EefAdapterNode):
     # --- commands ---------------------------------------------------------------------------------
     def _decide_binary(self, a: str, command: Command) -> Decision:
         if not self._check_subscriber():
-            return Decision(False, True, f'no stage subscriber on {self._stage_resolved}')
+            return Decision(False, True, self._stage_note)
         return Decision(True, True, 'engaged' if command == Command.ENGAGE else 'released')
 
     def _drive_binary(self, a: str, command: Command) -> None:
@@ -238,6 +272,7 @@ class IsaacEefAdapter(EefAdapterNode):
             return
         failure = None
         with self._lock:
+            self._status_arrival = self.steady_ns()
             now = self.now_ns()
             if not self._maybe_start() or now <= 0:
                 return

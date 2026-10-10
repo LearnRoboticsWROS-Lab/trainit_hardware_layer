@@ -133,16 +133,23 @@ docstring lists every key).
 A system-ROS node, one per robot, with `use_sim_time`, for binary suction only. It publishes the
 applied command on the stage command topic (required, no default: TSA fills it from the stage topic
 it detects), republished because the stage's subscription is volatile, and starts released. With
-no stage subscriber a command is refused and the vacuum reads UNAVAILABLE. The site's grasp comes
-only from the stage's own status ("Open|Closing|Closed <gripped count>", mapped by name) as
-SIM_GROUND_TRUTH; without that status topic the site is UNAVAILABLE and there is no grasp
-detection on this backend. The per-robot scene reset is recorded as a release.
+no stage a command is refused and the vacuum reads UNAVAILABLE. The stage is there when its command
+topic has a subscriber and, with a status topic, when its status arrived within
+`status_timeout_ms` of wall time: a subscriber alone (a recorder, an echo) is not the stage. The
+site's grasp comes only from the stage's own status ("Open|Closing|Closed <gripped count>", mapped
+by name) as SIM_GROUND_TRUTH; without that status topic the site is UNAVAILABLE and there is no
+grasp detection on this backend. "Closed 0" after an engage is a transient (Isaac 5.1 reports it
+for one frame on every attach, a re-grip included), never a decision: "Open 0" decides. The
+per-robot scene reset is recorded as a release.
 
 The stage must publish its status faster than once per `status_timeout_ms`, with a margin for its
 jitter: at least 5 Hz with the default 400 ms. A grasp source's floor in ADR-0022, 1/`max_age_ms`
 (2 Hz with the default 500 ms), is not enough here: the adapter reads a status older than
 `status_timeout_ms` as silent, so a 2 Hz stage would read UNKNOWN for part of every period. A
-status topic that never publishes (a wrong name) is named in `detail`.
+status topic that never publishes (a wrong name) is named in `detail`. Silence is measured on the
+wall clock as well as on the ROS clock: a dead or paused stage stops `/clock`, and with it every
+sim-time silence, so a stage that sends nothing for `status_timeout_ms` of real time reads
+UNKNOWN, never its last decision.
 
 ## The legacy contract (unchanged)
 
