@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>trainit_hardware_layer</name>
-  <version>0.2.0</version>
+  <version>0.2.1</version>
   <description>
     TrainIt hardware abstraction layer: the ROS contracts every hardware role must
     expose, the profiles that describe a specific piece of hardware in those terms,

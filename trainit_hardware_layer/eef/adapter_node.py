@@ -581,6 +581,12 @@ def run(node_cls: Type[EefAdapterNode], args=None) -> int:
         executor.spin()
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
+    except Exception:
+        # rclpy (Humble) can raise RCLError ("failed to initialize wait set: the given context is
+        # not valid") when the SIGINT handler shuts the context down while spin() rebuilds its wait
+        # set: that is the same clean stop. While the context is still valid it is a real failure.
+        if rclpy.ok():
+            raise
     finally:
         node.close()
         executor.shutdown(timeout_sec=5.0)
