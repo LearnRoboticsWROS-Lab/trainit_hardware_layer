@@ -23,6 +23,11 @@ Two contracts exist side by side. A project uses one of them.
   it. A block that breaks either rule is refused (exit code 2).
 - A simple suction cup is one device with one actuator (`vacuum`) and one site (`main`). A
   composite tool (axes, jaws, a lock) is the same model with more entries: one code path.
+- The command interface follows the actuator's SEMANTICS, not its functional label (ADR-0022, owner
+  decision of vNext M2.7): a binary open/close gripping actuator (pneumatic, electromagnetic) is a
+  `set_bool`; a position- or effort-controllable gripper is a `gripper_command`; a prismatic or
+  revolute positioning axis is a `follow_joint_trajectory` actuator even when the application uses
+  two operating poses; a binary lock, enable or valve is a `set_bool`.
 
 Not actuators: mimic followers, fixed frames, sensors, description pseudo-joints (the suction
 prismatic joint), and external conditions such as "the part is clear of the fixture".
@@ -41,7 +46,7 @@ collide (`/r1/eef/composite_tool/state` and `/r2/eef/composite_tool/state`).
 | gripper actuator (one driven joint, mimic followers) | the declared action, e.g. `gripper_a_controller/gripper_cmd` | `control_msgs/GripperCommand` | action | a `GripperActionController`, or the mock at the same name |
 | axis, or one coordinated multi-joint mechanism | the declared action, e.g. `linear_axis_controller/follow_joint_trajectory` | `control_msgs/FollowJointTrajectory` | action | one `joint_trajectory_controller` per actuator, or the mock at the same name |
 | tool state | `eef/<id>/state` | `trainit_interfaces/EndEffectorState` | RELIABLE, TRANSIENT_LOCAL, depth 1 | the device's TrainIt adapter, and nothing else |
-| adapter-owned joints | `eef/<id>/joint_states` | `sensor_msgs/JointState` | RELIABLE, depth 10 | the adapter |
+| adapter-owned joints | `eef/<id>/joint_states` | `sensor_msgs/JointState` | RELIABLE, depth 10 | the adapter (a composite mock bundle remaps it onto the robot's `joint_states`, vNext M2.7) |
 | scene signal (single-site devices) | `eef/<id>/engaged` | `std_msgs/Bool` | RELIABLE, TRANSIENT_LOCAL, depth 1 | the adapter for a `set_bool` grip; TMR for a `gripper_command` grip |
 
 The commands carry the tolerances where the standard allows it: a FollowJointTrajectory goal
@@ -103,7 +108,7 @@ observation slot).
 
 | Backend | Adapter row | Simple binary EEF | Simple jaw | Composite |
 |---|---|---|---|---|
-| `mock` | `trainit_mock`: `mock_eef_adapter` (here) | yes | yes (its joint reaches `joint_states` only through a merger row) | proven at model, node and adapter level; no bundle in M2.6 |
+| `mock` | `trainit_mock`: `mock_eef_adapter` (here) | yes | yes (its joint reaches `joint_states` only through a merger row) | a mock-only bundle since vNext M2.7: the generated launch remaps the adapter's `eef/<id>/joint_states` onto `joint_states`, so the tool joints reach robot_state_publisher and MoveIt |
 | `isaac` | `trainit_isaac_surface_gripper`: `isaac_eef_adapter` (here), plus the stage-side script in TSA's resources | yes; grasp detection only when the stage publishes its status | `none` | refused |
 | `gazebo` | `ros2_control` | `none` | GripperActionController, no state | refused |
 | `real` | `ros2_control` through the vendor bring-up, or `none` | `none` | as gazebo | refused |

@@ -11,6 +11,10 @@ MoveIt already expects. What varies between backends is only *who* moves the joi
 | action | `/<controller>/follow_joint_trajectory` | `control_msgs/FollowJointTrajectory` |
 | frames | `base_link` … `tool0` … `tcp` | from the URDF |
 
+Names are relative to the robot's namespace (ADR-0023): `/joint_states` and
+`/<controller>/follow_joint_trajectory` at the root, `/r3/joint_states` under `/r3`. TF stays
+global.
+
 The arm controller publishes to its own topic (`/joint_states_robot` for FR3WML) and a
 merger combines it with the gripper's, so `/joint_states` is complete. TSA reads that
 remap out of the base config's launch file and carries it as
