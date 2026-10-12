@@ -5,7 +5,8 @@ valid") from ``executor.spin()`` when the SIGINT handler shuts the context down 
 rebuilds its wait set. ``adapter_node.run`` treats an exception raised after the context was shut
 down as that clean stop (one STOPPED line on stderr), and any exception raised while the context is
 still valid as a real failure. Both orders are reproduced exactly, in a child process (the default
-rclpy context, domain 86, never the test session's): the race no longer depends on the scheduler.
+rclpy context, the harness's domain, never the test session's): the race no longer depends on the
+scheduler.
 """
 import os
 import subprocess
@@ -27,7 +28,7 @@ CHILD = textwrap.dedent("""
     from trainit_hardware_layer.eef import adapter_node
 
     class Probe(Node):
-        DEFAULT_NODE_NAME = '_shutdown_probe'     # '_': never one of the graph guard's nodes
+        DEFAULT_NODE_NAME = '_shutdown_probe'     # '_': hidden from RosSession.visible()
         def __init__(self):
             super().__init__(self.DEFAULT_NODE_NAME)
         def recommended_threads(self):
@@ -63,10 +64,16 @@ def _child(mode: str, cwd) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=60)
 
 
+def _tokens(stdout: str) -> list:
+    # Fast DDS prints its own diagnostics on stdout (a stale shared-memory lock, for one): only the
+    # child's token lines are judged
+    return [line for line in stdout.splitlines() if line.startswith(('PROBE_', 'RUN_'))]
+
+
 def test_an_exception_after_the_context_was_shut_down_is_a_clean_stop(tmp_path):
     proc = _child('after_shutdown', tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.splitlines() == ['PROBE_CLOSED', 'RUN_RETURNED 0']
+    assert _tokens(proc.stdout) == ['PROBE_CLOSED', 'RUN_RETURNED 0']
     assert ('STOPPED RCLError from spin() after the context was shut down: failed to initialize '
             'wait set: the given context is not valid') in proc.stderr
     assert 'Traceback' not in proc.stderr
@@ -75,6 +82,6 @@ def test_an_exception_after_the_context_was_shut_down_is_a_clean_stop(tmp_path):
 def test_an_exception_while_the_context_is_valid_is_a_real_failure(tmp_path):
     proc = _child('while_running', tmp_path)
     assert proc.returncode == 1, proc.stderr
-    assert proc.stdout.splitlines() == ['PROBE_CLOSED']      # the cleanup ran, run() did not return
+    assert _tokens(proc.stdout) == ['PROBE_CLOSED']      # the cleanup ran, run() did not return
     assert 'RCLError: failed to initialize wait set: the given context is not valid' in proc.stderr
     assert 'STOPPED' not in proc.stderr
