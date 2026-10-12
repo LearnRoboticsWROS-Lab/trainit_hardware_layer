@@ -73,7 +73,7 @@ def _tokens(stdout: str) -> list:
 def test_an_exception_after_the_context_was_shut_down_is_a_clean_stop(tmp_path):
     proc = _child('after_shutdown', tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert _tokens(proc.stdout) == ['PROBE_CLOSED', 'RUN_RETURNED 0']
+    assert _tokens(proc.stdout) == ['PROBE_CLOSED', 'RUN_RETURNED 0'], proc.stdout
     assert ('STOPPED RCLError from spin() after the context was shut down: failed to initialize '
             'wait set: the given context is not valid') in proc.stderr
     assert 'Traceback' not in proc.stderr
@@ -82,6 +82,6 @@ def test_an_exception_after_the_context_was_shut_down_is_a_clean_stop(tmp_path):
 def test_an_exception_while_the_context_is_valid_is_a_real_failure(tmp_path):
     proc = _child('while_running', tmp_path)
     assert proc.returncode == 1, proc.stderr
-    assert _tokens(proc.stdout) == ['PROBE_CLOSED']      # the cleanup ran, run() did not return
+    assert _tokens(proc.stdout) == ['PROBE_CLOSED'], proc.stdout   # the cleanup ran, no return
     assert 'RCLError: failed to initialize wait set: the given context is not valid' in proc.stderr
     assert 'STOPPED' not in proc.stderr
