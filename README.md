@@ -79,3 +79,7 @@ Vendor adapters stay in their own repositories: they are the vendor's, not Train
 This layer *declares* them in a profile.
 
 Start at [`contracts/README.md`](contracts/README.md).
+
+## Licence
+
+Apache-2.0: [`LICENSE`](LICENSE).
