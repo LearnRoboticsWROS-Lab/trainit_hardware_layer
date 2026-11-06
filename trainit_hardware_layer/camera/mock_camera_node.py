@@ -6,7 +6,9 @@ and debugged without a GPU or hardware. It is NOT a renderer and will never beco
 if you need images that mean something, use ``mode:=isaac``.
 
 What it IS good for: proving the contract is satisfied -- topic names, encodings, frame
-ids, QoS. Most vision-pipeline wiring bugs are exactly those, and they are far cheaper
+ids, QoS. Its depth is REGISTERED to colour by construction (contracts/camera.md, "Registered depth"):
+depth image, depth camera_info and point cloud all carry the colour optical frame, and the depth
+camera_info is identical to the colour one. Most vision-pipeline wiring bugs are exactly those, and they are far cheaper
 to find here than against a running simulator.
 
 QoS matches the contract: BEST_EFFORT for image and points, RELIABLE for camera_info.
@@ -30,8 +32,8 @@ INFO_QOS = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
 
 class MockCamera(Node):
 
-    def __init__(self):
-        super().__init__('mock_camera')
+    def __init__(self, **node_kwargs):
+        super().__init__('mock_camera', **node_kwargs)
         self.declare_parameter('profile', 'realsense_d455')
         self.declare_parameter('namespace', '')
         self.declare_parameter('rate_hz', 5.0)
@@ -42,8 +44,8 @@ class MockCamera(Node):
         colour, depth = prof['sensor']['color'], prof['sensor']['depth']
 
         self.w, self.h = int(colour['width']), int(colour['height'])
+        # Registered depth: one pixel grid, one optical frame (contracts/camera.md, "Registered depth").
         self.color_frame = prof['frames']['color_optical']
-        self.depth_frame = prof['frames']['depth_optical']
         self.dist_mm = int(self.get_parameter('plane_distance_m').value * 1000)
         self.fx = self.fy = (self.w / 2.0) / math.tan(math.radians(colour['hfov_deg']) / 2.0)
         self.cx, self.cy = self.w / 2.0, self.h / 2.0
@@ -61,7 +63,7 @@ class MockCamera(Node):
         self.create_timer(1.0 / float(self.get_parameter('rate_hz').value), self._tick)
         self.get_logger().info(
             f"mock camera on '{ns}' -- {self.w}x{self.h}, flat plane at "
-            f"{self.dist_mm/1000:.2f} m, frames {self.color_frame} / {self.depth_frame}. "
+            f"{self.dist_mm/1000:.2f} m, registered depth, every topic in {self.color_frame}. "
             f"Synthetic: proves the wiring, not the scene.")
 
     def _build_cloud(self) -> bytes:
@@ -95,7 +97,7 @@ class MockCamera(Node):
 
         d = Image(height=self.h, width=self.w, encoding='16UC1',
                   is_bigendian=0, step=self.w * 2, data=self._depth)
-        d.header.stamp, d.header.frame_id = now, self.depth_frame
+        d.header.stamp, d.header.frame_id = now, self.color_frame
         self.pub_depth.publish(d)
 
         n = len(self._cloud) // 16
@@ -106,11 +108,12 @@ class MockCamera(Node):
                     PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
                     PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
                     PointField(name='rgb', offset=12, datatype=PointField.FLOAT32, count=1)])
-        pc.header.stamp, pc.header.frame_id = now, self.depth_frame
+        pc.header.stamp, pc.header.frame_id = now, self.color_frame
         self.pub_pts.publish(pc)
 
-        self.pub_ci_c.publish(self._info(now, self.color_frame))
-        self.pub_ci_d.publish(self._info(now, self.depth_frame))
+        info = self._info(now, self.color_frame)
+        self.pub_ci_c.publish(info)
+        self.pub_ci_d.publish(info)               # registered depth: the colour intrinsics, exactly
 
 
 def main(args=None):

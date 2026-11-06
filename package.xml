@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>trainit_hardware_layer</name>
-  <version>0.2.1</version>
+  <version>0.3.0</version>
   <description>
     TrainIt hardware abstraction layer: the ROS contracts every hardware role must
     expose, the profiles that describe a specific piece of hardware in those terms,
@@ -20,6 +20,15 @@
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>realsense2_description</exec_depend>
+  <!-- realsense2_camera / realsense2_camera_msgs are NOT declared: they are needed only on a host that runs the REAL
+       backend (launch/realsense_camera.launch.py), and Community must build and test without them. That host
+       installs ros-humble-realsense2-camera (contracts/camera.md, `real`). -->
   <!-- The canonical end-effector adapters (ADR-0022 D8): the tool state is a TrainIt message;
        every command stays a standard ROS type, one per actuator. -->
   <exec_depend>trainit_interfaces</exec_depend>

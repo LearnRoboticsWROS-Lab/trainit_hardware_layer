@@ -7,7 +7,7 @@ package_name = 'trainit_hardware_layer'
 
 setup(
     name=package_name,
-    version='0.2.1',
+    version='0.3.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
@@ -16,6 +16,8 @@ setup(
         (os.path.join('share', package_name, 'profiles', 'robot'), glob('profiles/robot/*.yaml')),
         (os.path.join('share', package_name, 'profiles', 'eef'), glob('profiles/eef/*.yaml')),
         (os.path.join('share', package_name, 'profiles', 'camera'), glob('profiles/camera/*.yaml')),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
+        (os.path.join('share', package_name, 'urdf'), glob('urdf/*.xacro')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +32,8 @@ setup(
             # points are generated executable, so they cannot hit the permission bug
             # that broke mode:=isaac on 2026-08-24.
             'mock_camera = trainit_hardware_layer.camera.mock_camera_node:main',
+            # The real backend's source information (RealSense D4xx, beside realsense2_camera).
+            'realsense_source_info = trainit_hardware_layer.camera.realsense_source_info:main',
             # The canonical end-effector adapters (ADR-0022 D8): the rows trainit_mock and
             # trainit_isaac_surface_gripper.
             'mock_eef_adapter = trainit_hardware_layer.eef.mock_eef_adapter:main',

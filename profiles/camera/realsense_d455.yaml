@@ -40,6 +40,8 @@ topics:
 # against the CameraInfo a real device reports.
 sensor:
   color:  {width: 848, height: 480, fps: 30, encoding: rgb8, hfov_deg: 90.0}
+  # The physical depth sensor. The contract's depth TOPICS carry depth registered to colour (contracts/camera.md,
+  # "Registered depth"): colour grid and colour intrinsics; hfov_deg below is the sensor's, not the stream's.
   depth:  {width: 848, height: 480, fps: 30, encoding: 16UC1, units: millimetres,
            hfov_deg: 87.0, range_m: [0.4, 6.0]}
 
@@ -47,13 +49,38 @@ backends:
   mock:
     package: trainit_hardware_layer
     executable: mock_camera
+    # Provenance facts of this backend, declared (never inferred from a device) for a consumer that
+    # records data. Plain strings; the recorder validates them against its own vocabulary.
+    source_descriptor:
+      backend: mock
+      intrinsics_kind: NOMINAL_PROFILE        # computed from sensor.color.hfov_deg above, not measured
+      stamp_origin: HEADER                    # the node clock when the frame is published
+      registration_basis: same_pixel_grid     # depth synthesised on the colour pixel grid
   isaac:
     # No ROS-side node: the ROS2 Camera Helper publishes the contract directly.
     # See contracts/camera.md for the helper settings.
     node: null
     isaac_side: ros2_camera_helper
+    source_descriptor:
+      backend: isaac
+      intrinsics_kind: SYNTHETIC_RENDER       # the render product's camera model, not a measurement
+      stamp_origin: HEADER                    # the Camera Helper's header stamp (simulation time)
+      registration_basis: same_render_product # rgb and depth come from one render product
+      sim_source: isaac                       # the simulator whose clock stamps the frames
+      # Isaac renders the principal point in pixel-EDGE coordinates: the rendered image point lies 0.5 px up-left of
+      # the CameraInfo projection (pixel-centre convention). Recorded with the intrinsics; consumers decide.
+      intrinsics_notes: principal point in pixel-edge coordinates (rendered point = CameraInfo projection - 0.5 px in u and v)
   real:
-    # Runs in the Isaac ROS container on the Jetson, remapped onto the contract names.
+    # realsense2_camera on the host the camera is plugged into (a workstation or an edge computer), started and
+    # remapped onto the contract names by launch/realsense_camera.launch.py, beside its source information
+    # (<ns>/source_info). WHERE it runs is deployment, not backend: the same launch serves a local recorder and a
+    # remote one (contracts/camera.md, "Deployment topology").
     package: realsense2_camera
     executable: realsense2_camera_node
-    remote: true
+    launch: realsense_camera.launch.py
+    source_descriptor:
+      backend: real
+      intrinsics_kind: DEVICE_REPORTED        # the device's factory calibration, as the driver's CameraInfo reports it
+      stamp_origin: DRIVER_GLOBAL_TIME        # librealsense global time (device clock mapped onto the host clock);
+                                              # the recorder checks it against the OBSERVED clock domain in source_info
+      registration_basis: driver_align_depth  # the driver's align_depth (depth reprojected onto the colour grid)

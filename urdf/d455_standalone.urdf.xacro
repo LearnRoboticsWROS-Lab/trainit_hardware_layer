@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!--
+  A RealSense D455 on its own (a tripod or a bench mount), NO robot: the nominal frame tree of the OFFICIAL
+  description (realsense2_description, profiles/camera/realsense_d455.yaml), rooted at <name>_mount.
+
+  Used by launch/realsense_camera.launch.py standalone_description:=true when no cell description provides the
+  camera's frames. The transforms are NOMINAL (use_nominal_extrinsics), not the device's calibration: a recorder
+  labels an extrinsic read from them NOMINAL_DESCRIPTION. In a cell, the cell's own description provides these
+  frames instead and this file is not used.
+-->
+<robot name="d455_standalone" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="name" default="camera"/>
+  <xacro:include filename="$(find realsense2_description)/urdf/_d455.urdf.xacro"/>
+  <link name="$(arg name)_mount"/>
+  <xacro:sensor_d455 parent="$(arg name)_mount" name="$(arg name)" use_nominal_extrinsics="true">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:sensor_d455>
+</robot>
