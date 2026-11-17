@@ -107,6 +107,11 @@ refused at start-up (exit code 2).
     stamp freezes) until the next applied engage or release.
     ``unknown``: the source samples but can never tell: UNKNOWN.
     ``unavailable``: the site has no deciding source: UNAVAILABLE (no grasp_detection).
+``mock.sites.<s>.outcomes`` (string, ``''``)
+    A SEQUENCE of outcomes, comma-separated (``not_held,held``): the n-th applied engage of the site's
+    grip takes the n-th outcome, and the last one repeats. Non-empty, it replaces ``outcome`` (a
+    deterministic retry scenario: the first grasp fails, the next succeeds). ``unavailable`` is not
+    allowed in a sequence (a site's deciding source is fixed at start-up).
 ``mock.sites.<s>.evidence`` (string, ``sensor``)
     The source's class: ``sensor``, ``sim_ground_truth`` or ``actuation_inference``.
 ``mock.sites.<s>.after_s`` (double, 1.0)
@@ -152,7 +157,7 @@ FAILS = {
 OUTCOMES = ('held', 'not_held', 'pending', 'lost_after', 'stale_after', 'unknown', 'unavailable')
 ACTUATOR_KEYS = ('fail', 'fail_after_s', 'switch_confirms', 'confirm_after_ms', 'goal_tolerance',
                  'travel_s', 'initial_target')
-SITE_KEYS = ('outcome', 'evidence', 'after_s', 'decide_after_ms', 'silence_timeout_ms')
+SITE_KEYS = ('outcome', 'outcomes', 'evidence', 'after_s', 'decide_after_ms', 'silence_timeout_ms')
 
 LOOP_S = 0.01            # an emulated motion's step
 FEEDBACK_PERIOD_S = 0.05
@@ -254,8 +259,10 @@ class _Axis:
 class _SiteScript:
     """The scripted deciding source of one site."""
 
-    def __init__(self, outcome: str, decide_ns: int, after_ns: int):
-        self.outcome = outcome
+    def __init__(self, outcome: str, decide_ns: int, after_ns: int, sequence: Sequence[str] = ()):
+        self.outcome = sequence[0] if sequence else outcome
+        self.sequence = tuple(sequence)
+        self.engages = 0
         self.decide_ns = decide_ns
         self.after_ns = after_ns
         self.last: Optional[Reading] = None
@@ -378,14 +385,19 @@ class MockEefAdapter(EefAdapterNode):
             outcome = self.param(p + 'outcome', str, 'held')
             if outcome not in OUTCOMES:
                 raise Refused(p + 'outcome', f'one of {OUTCOMES}')
+            text = self.param(p + 'outcomes', str, '')
+            sequence = tuple(x.strip() for x in text.split(',')) if text.strip() else ()
+            allowed = tuple(o for o in OUTCOMES if o != 'unavailable')
+            if any(o not in allowed for o in sequence):
+                raise Refused(p + 'outcomes', f'a comma-separated sequence of {allowed}')
             evidence = self.param(p + 'evidence', str, 'sensor')
             if evidence not in core.EVIDENCE_BY_NAME:
                 raise Refused(p + 'evidence', f'one of {tuple(core.EVIDENCE_BY_NAME)}')
             after_ns = int(self.param(p + 'after_s', float, 1.0, positive=True) * 1e9)
             decide_ns = self.param(p + 'decide_after_ms', int, 100, non_negative=True) * 1_000_000
             silence = self.param(p + 'silence_timeout_ms', int, 0, non_negative=True)
-            self._scripts[s] = _SiteScript(outcome, decide_ns, after_ns)
-            sources[s] = None if outcome == 'unavailable' else core.EVIDENCE_BY_NAME[evidence]
+            self._scripts[s] = _SiteScript(outcome, decide_ns, after_ns, sequence)
+            sources[s] = None if self._scripts[s].outcome == 'unavailable' else core.EVIDENCE_BY_NAME[evidence]
             silence_ns[s] = silence * 1_000_000
         self._t0 = 0
         return sources, silence_ns
@@ -485,6 +497,11 @@ class MockEefAdapter(EefAdapterNode):
         if a in self._switch_pending:
             self._switch_pending[a] = True          # every applied state waits for its switch
         site = self.device.site_gripped_by(a)
+        if site is not None and command == Command.ENGAGE:
+            script = self._scripts[site.id]
+            script.engages += 1
+            if script.sequence:                     # the n-th engage takes the n-th outcome; the last repeats
+                script.outcome = script.sequence[min(script.engages, len(script.sequence)) - 1]
         if site is not None and command == Command.RELEASE:
             script = self._scripts[site.id]
             script.before_release = Reading.HELD if script.last == Reading.HELD else Reading.NOT_HELD

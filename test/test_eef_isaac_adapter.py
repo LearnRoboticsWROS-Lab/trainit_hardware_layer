@@ -7,14 +7,15 @@ on the stage command topic (the stage's subscription is volatile) and a periodic
 Covered: the adapter starts released and republishes its command; no stage subscriber gives
 ``success: false`` and UNAVAILABLE; without a status topic the site is UNAVAILABLE / NONE (no
 grasp_detection, never a grasp from the echo); the status is mapped by NAME (Closed / Closing /
-Open with the gripped count; a partial Closing with a count is HELD; PENDING within the engage
-timeout, then NOT_HELD or LOST); a malformed or contradictory sample reads UNKNOWN, and no sample
+Open with the gripped count; a partial Closing with a count is PENDING, never HELD; PENDING within
+the engage timeout, then NOT_HELD or LOST); a malformed or contradictory sample reads UNKNOWN, and no sample
 can raise in the callback and stop the adapter (non-ASCII digits, an over-long count, a failing
 mapping); a status timeout gives UNKNOWN / NONE; a status topic that never publishes is named in
 detail; the per-robot reset is a release; a rejected release does not disarm LOST; use_sim_time
 stamps on the simulation clock; the start-up refusals. From the T5 Isaac run: a subscriber alone
 is not the stage; a dead stage (its /clock stopped) reads UNKNOWN on the wall clock; the one-frame
-"Closed 0" of a re-grip is never a false LOST.
+"Closed 0" of a re-grip is never a false LOST. From the M4.5 benchmark: "Closed <n > 0>" reads HELD
+only after ``held_confirm_ms`` of continuous samples (a momentary attach is never HELD).
 """
 import random
 import time
@@ -78,7 +79,8 @@ def _client(probe, ns):
 def test_h7_the_mapping_is_by_name():
     second = 1_000_000_000
     assert map_stage_status('Closed 1', False, 0, second) == (Reading.HELD, '')
-    assert map_stage_status('Closing 2', True, 0, second) == (Reading.HELD, 'partial attachment (Closing 2)')
+    # vNext M4.5 design §8: a partial attachment is still closing, never HELD
+    assert map_stage_status('Closing 2', True, 0, second) == (Reading.UNDECIDED, 'partial attachment (Closing 2)')
     assert map_stage_status('Closing 0', True, 0, second) == (Reading.UNDECIDED, '')
     assert map_stage_status('Open 0', True, second // 2, second) == (Reading.UNDECIDED, '')
     assert map_stage_status('Open 0', True, 2 * second, second) == (Reading.NOT_HELD, '')
@@ -161,9 +163,11 @@ def test_h7_the_stage_status_drives_the_site(harness):
     assert h.call(client, SetBool.Request(data=True)).success
     stage.text = 'Closing 0'
     w.wait(lambda m: site(m, 'main')[:2] == (Grasp.PENDING, SIM))
-    stage.text = 'Closing 2'                                             # partial, with a count: HELD
-    m = w.wait(lambda m: site(m, 'main')[0] == Grasp.HELD)
-    assert m.detail == 'main: partial attachment (Closing 2)' and site(m, 'main')[1] == SIM
+    stage.text = 'Closing 2'                                             # partial, with a count: PENDING
+    m = w.wait(lambda m: m.detail == 'main: partial attachment (Closing 2)')
+    assert site(m, 'main')[:2] == (Grasp.PENDING, SIM)
+    time.sleep(0.3)
+    assert all(site(s, 'main')[0] != Grasp.HELD for s in w.since(m))      # never HELD while Closing
     stage.text = 'Closed 1'
     w.wait(lambda m: site(m, 'main')[0] == Grasp.HELD and m.detail == '')
     stage.text = 'Open 0'                                                # dropped, no release: LOST
@@ -333,6 +337,11 @@ def test_h7_use_sim_time_stamps_on_the_simulation_clock(harness):
     ('suction_simple', {}, 'stage_cmd_topic'),
     ('suction_simple', {'stage_cmd_topic': CMD, 'engage_timeout_ms': 5000}, 'engage_timeout_ms'),
     ('suction_simple', {'stage_cmd_topic': CMD, 'status_timeout_ms': 600}, 'status_timeout_ms'),
+    ('suction_simple', {'stage_cmd_topic': CMD, 'held_confirm_ms': -1}, 'held_confirm_ms'),
+    ('suction_simple', {'stage_cmd_topic': CMD, 'held_confirm_ms': 2000}, 'held_confirm_ms'),
+    ('suction_simple', {'stage_cmd_topic': CMD, 'engage_timeout_ms': 300, 'held_confirm_ms': 300},
+     'held_confirm_ms'),
+    ('suction_simple', {'stage_cmd_topic': CMD, 'held_confirm_ms': 0.1}, 'held_confirm_ms'),
     ('suction_simple', {'stage_cmd_topic': CMD, 'republish_rate_hz': 0.0}, 'republish_rate_hz'),
     ('suction_simple', {'stage_cmd_topic': 'bad topic!'}, 'stage_cmd_topic'),
     ('suction_simple', {'stage_cmd_topic': CMD, 'mock.sites.main.outcome': 'held'}, None),
@@ -425,3 +434,117 @@ def test_h7_a_re_grip_after_a_slip_is_never_a_false_lost(harness):
     # a real loss still latches: the gripper gives up (Open 0) after the window
     stage.text = 'Open 0'
     w.wait(lambda m: site(m, 'main')[0] == Grasp.LOST)
+
+
+MS = 1_000_000
+
+
+def test_h7_held_confirm_dwell_logic(harness):
+    """The dwell, deterministically (no stage: _confirm_held is fed arrival / ROS ns directly):
+    HELD needs held_confirm_ms on BOTH clocks; anything else or a ROS clock gone back resets it."""
+    adapter = harness.isaac('/i11', stage_cmd_topic=CMD, held_confirm_ms=150)
+    pending = (Reading.UNDECIDED, 'attachment not yet confirmed (held_confirm_ms 150)')
+    c = adapter._confirm_held
+    assert c(Reading.HELD, '', 1000 * MS, 5000 * MS) == pending                  # the run starts
+    assert c(Reading.HELD, '', 1149 * MS, 5149 * MS) == pending
+    assert c(Reading.HELD, '', 1150 * MS, 5150 * MS) == (Reading.HELD, '')       # 150 ms on both
+    assert c(Reading.HELD, '', 1300 * MS, 5300 * MS) == (Reading.HELD, '')
+    # a drop below "Closed <n > 0>" (here Closing 0, or a partial Closing) resets the dwell
+    assert c(Reading.UNDECIDED, 'partial attachment (Closing 1)', 1320 * MS, 5320 * MS) == (
+        Reading.UNDECIDED, 'partial attachment (Closing 1)')
+    assert c(Reading.HELD, '', 1340 * MS, 5340 * MS) == pending
+    assert c(Reading.HELD, '', 1489 * MS, 5489 * MS) == pending
+    assert c(Reading.HELD, '', 1490 * MS, 5490 * MS) == (Reading.HELD, '')
+    for other in (Reading.NOT_HELD, Reading.CANNOT_TELL):
+        assert c(other, 'x', 1500 * MS, 5500 * MS) == (other, 'x')
+        assert c(Reading.HELD, '', 1510 * MS, 5510 * MS) == pending
+    # a slow simulation: the wall dwell has passed, the ROS (sim) one has not -- and the reverse
+    c(Reading.NOT_HELD, '', 2000 * MS, 6000 * MS)
+    assert c(Reading.HELD, '', 2000 * MS, 6000 * MS) == pending
+    assert c(Reading.HELD, '', 2400 * MS, 6100 * MS) == pending
+    assert c(Reading.HELD, '', 2410 * MS, 6150 * MS) == (Reading.HELD, '')
+    c(Reading.NOT_HELD, '', 3000 * MS, 7000 * MS)
+    assert c(Reading.HELD, '', 3000 * MS, 7000 * MS) == pending
+    assert c(Reading.HELD, '', 3100 * MS, 7400 * MS) == pending
+    assert c(Reading.HELD, '', 3150 * MS, 7400 * MS) == (Reading.HELD, '')
+    # a ROS clock that goes back (a simulation reset) starts the run again
+    assert c(Reading.HELD, '', 3200 * MS, 100 * MS) == pending
+    assert c(Reading.HELD, '', 3349 * MS, 249 * MS) == pending
+    assert c(Reading.HELD, '', 3350 * MS, 250 * MS) == (Reading.HELD, '')
+    # 0: the previous behaviour, the first "Closed <n > 0>" is HELD
+    immediate = harness.isaac('/i12', stage_cmd_topic=CMD, held_confirm_ms=0)
+    assert immediate._confirm_held(Reading.HELD, '', 1 * MS, 1 * MS) == (Reading.HELD, '')
+
+
+def test_h7_closed_reads_held_only_after_the_dwell(harness):
+    """Closed 1 is PENDING (detail: not yet confirmed) for held_confirm_ms, then HELD; a drop to a
+    partial Closing before the dwell restarts it."""
+    harness.isaac('/i13', stage_cmd_topic=CMD, stage_status_topic=STATUS, held_confirm_ms=400)
+    stage = FakeStage(harness, '/i13', status_hz=50.0)
+    probe = harness.helper('h7_dwell')
+    w = h.StateWatch(probe, '/i13/eef/suction_simple/state', depth=4000)
+    client = _client(probe, '/i13')
+    w.wait(lambda m: m.status == TS.READY and site(m, 'main')[0] == Grasp.NOT_HELD, timeout=6.0)
+    assert h.call(client, SetBool.Request(data=True)).success
+    w.wait(lambda m: actuator(m, 'vacuum').last_command == Command.ENGAGE)
+    note = 'main: attachment not yet confirmed (held_confirm_ms 400)'
+    stage.text = 'Closed 1'
+    first = w.wait(lambda m: m.detail == note)
+    assert site(first, 'main')[:2] == (Grasp.PENDING, SIM)
+    time.sleep(0.15)                                       # well inside the dwell: a partial Closing
+    stage.text = 'Closing 1'
+    w.wait(lambda m: m.detail == 'main: partial attachment (Closing 1)')
+    stage.text = 'Closed 1'
+    w.wait(lambda m: site(m, 'main')[0] == Grasp.HELD, timeout=3.0)
+    run = w.since(first)
+    k = next(i for i, m in enumerate(run) if site(m, 'main')[0] == Grasp.HELD)
+    held = run[k]
+    assert held.detail == '' and site(held, 'main')[1] == SIM
+    # the dwell ran again from the second "Closed 1" (stamps are the samples' ROS ns): the newest
+    # partial-Closing sample before HELD bounds the second run's start from below
+    partial = max(site(m, 'main')[2] for m in run[:k] if 'partial attachment' in m.detail)
+    assert site(held, 'main')[2] - partial >= 400 * MS - 30 * MS
+    assert site(held, 'main')[2] - site(first, 'main')[2] >= 400 * MS + 150 * MS - 30 * MS
+
+
+def test_h7_a_momentary_attach_is_never_held(harness):
+    """The M4.5 benchmark: the SurfaceGripper attached a body for ~50 ms and lost it at once, and
+    VerifyGrasp said held. A Closed 1 shorter than the dwell, then Closed 0 (Isaac's transient: still
+    PENDING after an engage), then Open 0: never HELD, NOT_HELD after the engage timeout, never LOST."""
+    harness.isaac('/i14', stage_cmd_topic=CMD, stage_status_topic=STATUS,
+                  engage_timeout_ms=700, held_confirm_ms=150)
+    stage = FakeStage(harness, '/i14', status_hz=50.0)
+    probe = harness.helper('h7_momentary')
+    w = h.StateWatch(probe, '/i14/eef/suction_simple/state', depth=4000)
+    client = _client(probe, '/i14')
+    start = w.wait(lambda m: m.status == TS.READY and site(m, 'main')[0] == Grasp.NOT_HELD, timeout=6.0)
+    assert h.call(client, SetBool.Request(data=True)).success
+    engage = h.ns_of(actuator(w.wait(lambda m: actuator(m, 'vacuum').last_command == Command.ENGAGE),
+                              'vacuum').last_command_stamp)
+    stage.text = 'Closed 1'
+    w.wait(lambda m: m.detail == 'main: attachment not yet confirmed (held_confirm_ms 150)')
+    time.sleep(0.05)                                                      # the ~50 ms attach
+    stage.text = 'Closed 0'
+    time.sleep(0.2)
+    assert site(w.latest(), 'main')[0] == Grasp.PENDING
+    stage.text = 'Open 0'                                                 # the gripper gives up
+    settled = w.wait(lambda m: site(m, 'main')[0] == Grasp.NOT_HELD and site(m, 'main')[2] >= engage)
+    assert site(settled, 'main')[2] - engage >= 700 * MS - 50 * MS
+    time.sleep(0.2)
+    assert all(site(m, 'main')[0] not in (Grasp.HELD, Grasp.LOST) for m in w.since(start))
+
+
+def test_h7_held_confirm_zero_keeps_the_immediate_held(harness):
+    """held_confirm_ms 0: the first "Closed <n > 0>" sample reads HELD, as before M4.5."""
+    harness.isaac('/i15', stage_cmd_topic=CMD, stage_status_topic=STATUS, held_confirm_ms=0)
+    stage = FakeStage(harness, '/i15', status_hz=50.0)
+    probe = harness.helper('h7_immediate')
+    w = h.StateWatch(probe, '/i15/eef/suction_simple/state', depth=4000)
+    client = _client(probe, '/i15')
+    w.wait(lambda m: m.status == TS.READY and site(m, 'main')[0] == Grasp.NOT_HELD, timeout=6.0)
+    assert h.call(client, SetBool.Request(data=True)).success
+    stage.text = 'Closing 0'
+    w.wait(lambda m: site(m, 'main')[0] == Grasp.PENDING and m.detail == '')
+    stage.text = 'Closed 1'
+    w.wait(lambda m: site(m, 'main')[0] == Grasp.HELD and m.detail == '')
+    assert all('not yet confirmed' not in m.detail for m in w.all())     # no dwell at all

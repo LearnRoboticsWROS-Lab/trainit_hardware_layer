@@ -28,8 +28,10 @@ SIM_GROUND_TRUTH:
 
 | Stage status | Gripped count | Context | Vacuum binary / site grasp |
 |---|---|---|---|
-| Closed | > 0 | - | ENGAGED / HELD |
-| Closing | > 0 | - | ENGAGED / HELD, ``detail``: partial attachment |
+| Closed | > 0 | seen continuously for ``held_confirm_ms`` | ENGAGED / HELD |
+| Closed | > 0 | seen for less than ``held_confirm_ms`` | ENGAGED / PENDING, ``detail``: |
+| | | | attachment not yet confirmed |
+| Closing | > 0 | - | ENGAGED / PENDING, ``detail``: partial attachment (never HELD) |
 | Closing | 0 | - | ENGAGED / PENDING |
 | Closed | 0 | after an applied ENGAGE | ENGAGED / PENDING: a transient (Isaac 5.1 reports it for |
 | | | | one frame on every attach, a re-grip included), never a decision |
@@ -37,6 +39,19 @@ SIM_GROUND_TRUTH:
 | | | | then NOT_HELD, or LOST if it had been HELD |
 | Open (or Closed) | 0 | after an applied RELEASE, or no command | RELEASED / NOT_HELD |
 | no sample within ``status_timeout_ms`` | - | - | site UNKNOWN, evidence NONE |
+
+HELD is "Closed" with at least one gripped body (vNext M4.5 design §8), and only once the stage has
+reported it CONTINUOUSLY for ``held_confirm_ms``: an Isaac SurfaceGripper can attach a body for a
+few frames and lose it at once (the M4.5 benchmark measured a ~50 ms attach), and the first HELD
+sample is what makes VerifyGrasp succeed. The dwell is measured on the status samples' own arrival,
+on BOTH clocks (the ROS clock, sim time with ``use_sim_time``, and the WALL clock, as the silence
+below): HELD needs ``held_confirm_ms`` on each. Any sample that is not "Closed <n > 0>" (a
+"Closing <n>", a "Closed 0", an "Open 0", a malformed one) resets it, and so does a ROS clock that
+goes back. Until then the site reads PENDING after an engage (UNKNOWN with no engage: the core
+model has no PENDING without one). ``held_confirm_ms`` 0 is the previous behaviour: the first
+"Closed <n > 0>" is HELD. "Closing <n > 0>" is never HELD: a partial attachment is still closing.
+This is the adapter's reading of the stage; the canonical grasp semantics (ADR-0022) and the
+EndEffectorState message are unchanged.
 
 Silence is measured on both clocks: the ROS clock (sim time) and the WALL clock, because a dead or
 paused stage stops ``/clock`` and with it any sim-time silence; a stage that sent nothing for
@@ -65,6 +80,8 @@ Parameters (besides ``device_id``, the ``eef.<id>.*`` block and the common ones 
 - ``stage_status_topic`` (string, '' = none);
 - ``republish_rate_hz`` (double, 2.0);
 - ``engage_timeout_ms`` (int, 2000; at most ``verification.timeout_ms``);
+- ``held_confirm_ms`` (int, 150; >= 0 and below ``engage_timeout_ms``; 0 = HELD on the first
+  "Closed <n > 0>"): how long "Closed <n > 0>" must be seen continuously before it reads HELD;
 - ``status_timeout_ms`` (int, 400; at most ``verification.max_age_ms``; the stage publishes its
   status faster than once per this, see above);
 - ``scene_reset_topic`` (string, '' = none).
@@ -114,6 +131,9 @@ def map_stage_status(text: str, engaged: bool, since_engage_ns: int,
                      engage_timeout_ns: int) -> Tuple[Reading, str]:
     """One stage status sample -> (reading, detail note), by NAME (ADR-0022 D8 table).
 
+    HELD here is the stage's "Closed <n > 0>" as reported; the adapter confirms it over
+    ``held_confirm_ms`` before it reads HELD (see the module docstring).
+
     `engaged`: the vacuum's newest applied command is ENGAGE, `since_engage_ns` ago. Total: any
     text gives a reading, never an exception. The count is plain ASCII digits (str.isdigit() also
     accepts '²' and '٣'; int() refuses the first and reads the second as 3).
@@ -131,7 +151,8 @@ def map_stage_status(text: str, engaged: bool, since_engage_ns: int,
         if name == 'Closed':
             return Reading.HELD, ''
         if name == 'Closing':
-            return Reading.HELD, f'partial attachment ({_cut(text)})'
+            # still closing: a partial attachment is no grasp yet (vNext M4.5 design §8)
+            return Reading.UNDECIDED, f'partial attachment ({_cut(text)})'
         return Reading.CANNOT_TELL, f'contradictory stage status {_quoted(text)}'
     if name == 'Closing':
         return Reading.UNDECIDED, ''
@@ -151,7 +172,7 @@ class IsaacEefAdapter(EefAdapterNode):
     ADAPTER_ROW = 'trainit_isaac_surface_gripper'
     DEFAULT_NODE_NAME = 'isaac_eef_adapter'
     BACKEND_PARAMS = ('stage_cmd_topic', 'stage_status_topic', 'republish_rate_hz',
-                      'engage_timeout_ms', 'status_timeout_ms', 'scene_reset_topic')
+                      'engage_timeout_ms', 'held_confirm_ms', 'status_timeout_ms', 'scene_reset_topic')
 
     def _configure(self):
         dev = self.device
@@ -179,6 +200,11 @@ class IsaacEefAdapter(EefAdapterNode):
         if self.engage_timeout_ms > v.timeout_ms:
             raise Refused('engage_timeout_ms',
                           f'at most verification.timeout_ms ({v.timeout_ms}): VerifyGrasp must see the decision')
+        self.held_confirm_ms = self.param('held_confirm_ms', int, 150, non_negative=True)
+        if self.held_confirm_ms >= self.engage_timeout_ms:
+            raise Refused('held_confirm_ms',
+                          f'below engage_timeout_ms ({self.engage_timeout_ms}): a grasp must be '
+                          'confirmed within the engage window')
         self.status_timeout_ms = self.param('status_timeout_ms', int, 400, positive=True)
         if self.status_timeout_ms > v.max_age_ms:
             raise Refused('status_timeout_ms',
@@ -189,6 +215,7 @@ class IsaacEefAdapter(EefAdapterNode):
         self._stage_resolved = ''
         self._status_resolved = ''
         self._status_arrival = 0          # steady ns of the newest stage status, 0 = none yet
+        self._closed_since = None         # (steady ns, ROS ns) of the first "Closed <n > 0>" of a run
         self._stage_note = ''
         source = core.Evidence.SIM_GROUND_TRUTH if self.stage_status_topic else None
         return ({self.site: source}, {self.site: self.status_timeout_ms * 1_000_000})
@@ -284,6 +311,7 @@ class IsaacEefAdapter(EefAdapterNode):
                 failure = e
                 reading = Reading.CANNOT_TELL
                 note = f'malformed stage status {_quoted(msg.data)} ({type(e).__name__})'
+            reading, note = self._confirm_held(reading, note, self._status_arrival, now)
             self.core.set_site_note(self.site, note)
             self.core.observe_site(self.site, reading, now)
             self._publish_changes()
@@ -293,6 +321,23 @@ class IsaacEefAdapter(EefAdapterNode):
         elif reading == Reading.CANNOT_TELL:
             self.get_logger().warn(f'{self.site}: {note}: it reads as cannot tell',
                                    throttle_duration_sec=LOG_THROTTLE_S)
+
+    def _confirm_held(self, reading: Reading, note: str, arrival: int, now: int) -> Tuple[Reading, str]:
+        """The dwell: "Closed <n > 0>" (the mapping's HELD) reads HELD only once it has been seen
+        continuously for held_confirm_ms on BOTH the wall and the ROS clock, by the samples' own
+        arrival; before that it is UNDECIDED. Anything else, or a ROS clock gone back, resets it."""
+        if reading != Reading.HELD:
+            self._closed_since = None
+            return reading, note
+        if self.held_confirm_ms == 0:
+            return reading, note
+        if self._closed_since is None or now < self._closed_since[1]:
+            self._closed_since = (arrival, now)
+        dwell = self.held_confirm_ms * 1_000_000
+        wall0, ros0 = self._closed_since
+        if arrival - wall0 >= dwell and now - ros0 >= dwell:
+            return reading, note
+        return Reading.UNDECIDED, f'attachment not yet confirmed (held_confirm_ms {self.held_confirm_ms})'
 
     def _on_reset(self, msg: Bool) -> None:
         if self.closing:

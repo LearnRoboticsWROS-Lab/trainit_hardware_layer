@@ -307,6 +307,26 @@ def test_h4_the_same_edge_with_no_command_is_lost_until_the_next_release(harness
     w.wait(lambda m: site(m, 'main')[0] == Grasp.NOT_HELD and actuator(m, 'vacuum').last_command == Command.RELEASE)
 
 
+def test_h4_an_outcome_sequence_scripts_one_outcome_per_engage(harness):
+    """vNext M4.5: `mock.sites.<s>.outcomes` -- the n-th applied engage takes the n-th outcome, the last repeats:
+    the first grasp fails (NOT_HELD), the next ones succeed (HELD)."""
+    harness.mock('/r6', 'suction_simple', **{'mock.sites.main.outcomes': 'not_held,held',
+                                             'mock.sites.main.decide_after_ms': 50})
+    probe = harness.helper('h4_sequence')
+    w = h.StateWatch(probe, '/r6/eef/suction_simple/state', depth=500)
+    client = probe.create_client(SetBool, '/r6/eef/suction_simple/actuators/vacuum/set_engaged')
+    seen = []
+    for _ in range(3):
+        assert h.call(client, SetBool.Request(data=True)).success
+        decided = w.wait(lambda m: actuator(m, 'vacuum').last_command == Command.ENGAGE
+                         and site(m, 'main')[0] in (Grasp.HELD, Grasp.NOT_HELD), timeout=3.0)
+        seen.append(site(decided, 'main')[0])
+        assert h.call(client, SetBool.Request(data=False)).success
+        w.wait(lambda m: actuator(m, 'vacuum').last_command == Command.RELEASE
+               and site(m, 'main')[0] == Grasp.NOT_HELD, timeout=3.0)
+    assert seen == [Grasp.NOT_HELD, Grasp.HELD, Grasp.HELD]
+
+
 # ================================================================================================
 # H5 -- the joint_trajectory_controller emulation
 # ================================================================================================
@@ -836,6 +856,8 @@ def test_an_injected_condition_from_t0_is_in_the_first_latched_sample(harness):
     ('suction_simple', {'publish_rate_hz': 0.0}, 'publish_rate_hz'),
     ('jaw_simple', {'compat.trigger_on': '/suction/on', 'compat.trigger_off': '/suction/off'},
      'compat.trigger_on'),
+    ('suction_simple', {'mock.sites.main.outcomes': 'held,maybe'}, 'mock.sites.main.outcomes'),
+    ('suction_simple', {'mock.sites.main.outcomes': 'not_held,unavailable'}, 'mock.sites.main.outcomes'),
     ('suction_simple', {'device_id': 7}, 'device_id'),
     ('suction_simple', {'device_id': 'jaw_simple'}, 'eef.jaw_simple.actuator_ids'),
 ])
